@@ -3,6 +3,6 @@ This is a repo to house my R code on implimenting a version of aoristic function
 
 ### ToDo:
 
-*  Add parallel and optimize code to speed it up
+*  Add parallel and optimize code to speed it up :ballot_box_with_check:
 *  port probabilistic portions to Stan model
 *  Incorporate spatial objects
