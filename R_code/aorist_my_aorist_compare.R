@@ -1,15 +1,21 @@
+###########################################
+# Sandbox to compare execution time of functions, in this case archSeries::aorist()
+# vs my_aorist2() [my verion with all DT and foverlaps()].  Test can be over a range of sites
+# and reports graph of results, summarization of results, intuition of rate per 1,000 sites
+# and profvis package to profile functions.
+# This will remain pretty much unchangesd.
+###########################################
+
 library("ggplot2")
 library("profvis")
 library("dplyr")
 library("tidyr")
 
-
-
 time_step_size <- 100 # years
 seq_begin <- -5000
 seq_end   <- 0
 
-sim_site_count_seq <- c(10,seq(50,10000,50))
+sim_site_count_seq <- c(10,seq(50,50000,50))
 
 execute_time_results <- matrix(nrow = length(sim_site_count_seq), ncol = 3)
 colnames(execute_time_results) <- c("site_count", "aorist", "my_aorist")
@@ -30,7 +36,7 @@ for(i in seq_along(sim_site_count_seq)){
     aor <- aorist(sites2, end.date = 5000, bin.width = 100)
   aor.end.time <- Sys.time()
   my.aor.start.time <- Sys.time()
-    my_aor <- my_aorist(sites2, end.date = 5000, bin.width = 100)
+    my_aor <- my_aorist2(sites2, end.date = 5000, bin.width = 100)
   my.aor.end.time <- Sys.time()
   
   aor.execute.time <- aor.end.time - aor.start.time
@@ -54,7 +60,8 @@ execute_time_summary <- execute_time_results %>%
             min_diff       = round(max(diff),4), # reverse b/c negative time
             mean_diff      = round(mean(diff),3)) %>%
   t()
-          
+print(execute_time_summary)
+
 plot_dat <- execute_time_results %>%
   dplyr::select(site_count, aorist, my_aorist) %>%
   gather(model, time, -site_count)
@@ -67,9 +74,9 @@ aor_lm <- lm(aorist ~ site_count, data = execute_time_results)
 aor_lm <- (as.numeric(coef(aor_lm))[2]) * 10000
 my_aor_lm <- lm(my_aorist ~ site_count, data = execute_time_results)
 my_aor_lm <- (as.numeric(coef(my_aor_lm))[2]) * 10000
-message(paste0("Initially, my_aoristic is ", round(execute_time_results[2,"diff"],3),
-  " seconds faster at ", execute_time_results[2,"site_count"], " sites, is equivalent at 5000 sites, and is ",
-  round(execute_time_results[201,"diff"],3), " seconds slower at 10,000 sites. For every 1000 sites added: aoristic = ", round(aor_lm,4), " seconds increase; my_aoristic = ",
+message(paste0("my_aoristic is ", round(execute_time_results[2,"diff"],3),
+  " seconds faster at ", execute_time_results[2,"site_count"], " , and is ",
+  round(execute_time_results[201,"diff"],3), " seconds faster at 10,000 sites. For every 1000 sites added: aoristic = ", round(aor_lm,4), " seconds increase; my_aoristic = ",
                round(my_aor_lm,4), " seconds increase in execution time."))
 
 profvis({
@@ -78,7 +85,7 @@ profvis({
 })
 
 profvis({
-  my_aor_profile <- my_aorist(sites2, end.date = 5000, bin.width = 100)
+  my_aor_profile <- my_aorist2(sites2, end.date = 5000, bin.width = 100)
   print(my_aor_profile)
 })
 

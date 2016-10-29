@@ -1,3 +1,13 @@
+######################################
+# wokring to compare my code to the archSeries::aorist() function()
+# below is my original my_aorist() attempt which works, but is slowed by dlpyr
+# then is my new my_aorist2() function (will likely change name) which is 100% data.table
+# and data.table::foverlaps().  It is twice as fast as archSeries::aorist() and way way 
+# faster then my original my_aorist().  I don't think I can squeeze much more out of 
+# the new function without serious optimization in math or parallelization.
+# This script is probably to remain as is as there is not much more to do with this function.
+#######################################
+
 devtools::install_github("davidcorton/archSeries")
 library("archSeries")
 
@@ -10,11 +20,16 @@ sites2 <- sites %>%
 data <-  sites2
 
 aor <- aorist(sites2, end.date = 5000, bin.width = 100)
-my_aor <- my_aorist(sites2, end.date = 5000, bin.width = 100)
+# my_aor <- my_aorist(sites2, end.date = 5000, bin.width = 100)
+my_aor2 <- my_aorist2(sites2, end.date = 5000, bin.width = 100)
 
-plot(aor$aorist , my_aor$aorist)
-sqrt(mean((aor$aorist - my_aor$aorist)^2))
+plot(aor$aorist , my_aor2$aorist)
+sqrt(mean((aor$aorist - my_aor2$aorist)^2))
 
+################## My original attempt at aorist function
+## works correctly, but profiling showed it did not scale well
+## because of the mutate/dplyr stuff.
+## I'll moth ball this, and make some additional versions
 my_aorist <- function(data, weight = 1, start.date = 0, end.date = 2000, 
                       bin.width = 100, round_int = 4) {
   require(dplyr)
@@ -48,6 +63,35 @@ my_aorist <- function(data, weight = 1, start.date = 0, end.date = 2000,
     dplyr::select(bin, bin.no, aorist)
   return(aorist)
 }
+
+
+################## My 2nd attempt at aorist function
+## cut down on dplyr/mutate in favor of data.table
+## WORKING AND RMSE ~ zero
+## TWICE AS FAST as archSeries::aorist() and multitudes faster than my original my_aorist()
+my_aorist2 <- function(data, start.date = 0, end.date = 2000, bin.width = 100) {
+  require(data.table)
+  setDT(data)
+  time_steps <- data.table(
+    bin.no  = seq(1:(abs(end.date)/bin.width)), # end not start b/c pos dates
+    Start = seq(start.date,(end.date-bin.width), by = bin.width),
+    End   = seq((start.date+bin.width),end.date, by = bin.width))
+  setkey(time_steps, Start, End)
+  overlap_names <- data.table::foverlaps(data, time_steps, 
+                   type = "any", which = FALSE)
+  overlap_names <- overlap_names[i.Start != End & i.End != Start]
+  overlap_names[, duration := (i.End - i.Start)] 
+  overlap_names[, W := (bin.width / duration)] 
+  ov_sum <- overlap_names[, .(aorist = sum(W),
+                              median_step_W = median(W),
+                              site_count = .N), keyby=.(bin.no)]
+  setkey(ov_sum, bin.no)
+  setkey(time_steps, bin.no)
+  ov_sum2 <- ov_sum[time_steps, nomatch = 0]
+  ov_sum2[, bin := paste0(Start, "-", End)]
+  return(ov_sum2)
+}
+
 
 ############# Annotated archSeries Function below - OG code + comments
 function (data, weight = 1, start.date = 0, end.date = 2000, 

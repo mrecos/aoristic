@@ -1,3 +1,10 @@
+##########################
+# my first attempt at making this work.  This code works, but is not very effiecient
+# I'll leave this as is, but the better implimentation is to use the 
+# aorist function I wrote with all data.table and data.table::foverlaps()
+# It is by far the fastest way to go (without better math or deep parallelization)
+########################
+
 # http://stackoverflow.com/a/17257422/2259277
 number_ticks <- function(n){
   function(limits) pretty(limits, n)
