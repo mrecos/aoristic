@@ -1,0 +1,347 @@
+---
+title: "aoristic compare"
+output: html_document
+---
+
+### Comparison of execution times of `archSeries::aorist` and my version of the same analysis; `my_aorist`.
+I performed this purely out of interest in how the packages approach (`data.table` and `for` loops) and my approach (`data.table::foverlaps()` and `dplyr`).  The key difference to these approaches is that `archSeries::aorist()` uses a loop and a series of comparisons to find date range overlaps, where as `my_aorist` uses the `data.table::foverlaps()` function to do this.  The `foverlaps()` function is a C++ implementation of a range join.  There is also a slightly different approach to the two functions calculations of the aoristic weight, but it does not effect execution time or the results (to a very small rounding error).
+
+### Findings
+
+*  `my_aorist()` executes faster when the site/event sample is less the 5,000. At less than 1,000 sites/events, it is about 0.25 seconds faster.
+*  `aorist()` executes faster over about 5,000 sites/events. At about 10,000 sites/events it is about 0.25 seconds faster.
+*  `my_aorist()` scales poorly with an increase of about 0.55 seconds per 10,000 sites/event
+*  `aorist()` scales very well, nearly linearly, with an increase of only about 0.03 seconds per 10,000 sites/events
+*  I think it is unlikely for this function to be used for samples of sites/events larger than 5,000, but that extra 0.25 seconds is likely not going to bother anyone.
+*  The most interesting finding for my was why the supposedly faster implementation of of `foverlaps()` was scaled so much worse than the supposedly slower implementation of a `for` loop.  The answer is `dplyr`!
+*  Without the `dplyr` code, the `my_aorist()` with `foverlaps()` executes much quicker and scales as well as `archSeries::aorist()`
+*  Using the `data.table` munge functions and `data.table::foverlaps()` may be the best compromise of computation time.
+
+In the function profiling at the bottom of this analysis, using `profVis`, I think I found the answer to the scaling issue.  The biggest time usage of the `aorist()` is `<=` and `%in%` operator that is executed somewhere within the `data.table` evaluations (not explicit in the function code).  The slowest part of the `my_aorist()` is in the series of `tryCatch` and `doTryCatch` that execute within `mutate_tbl.df()`, presumably within `dplyr::mutate()` that I use. So the `foverlaps()` is not the culprit and leads to the overall quicker execution. This idea was confirmed when I repeated the below code with a version of `my_aorist()` that removed the `dplyr` code; in which the `foverlaps()` code scale equally to `aorist()`, but  0.31 seconds faster on average across a range of 10 to 10,000 sites/events.
+
+### Bottom Line
+The `dplyr` data munge in the `my_aorist()` function does not scale well and slows it down pretty dramatically once over 5,000 sites/events. This may be entirely because of my crappy coding, but I'll have try to see if that can improve the time. The `foverlaps()` is lightning fast and without the `dplyr` slowdown makes `my_aorist()` much faster than `aorist()` across a full range of 10 to 10,000 sites/events.  It might be interesting to work `foverlaps()` into the `archSeries::aorist()` function for a speed boost.  Does 0.3 seconds matter to anyone running this analysis; probably not. However, it was fun to find out how these different implementations work.
+
+
+#### Packages
+```{r packages, message=FALSE}
+library("ggplot2")
+library("profvis")
+library("dplyr")
+library("tidyr")
+library("archSeries")
+```
+
+
+#### `archSeries::aorist()` function
+
+I am testing this as a Global environment function to eliminate any time difference that running it from the installed `archSeries` package may lead to.  (PS - there is no difference, I ran it both ways)
+
+```{r archSeries_aorist, comment=''}
+archSeries_aorist <- function (data, weight = 1, start.date = 0, end.date = 2000, 
+          bin.width = 100){
+  require(data.table)
+  data <- data.table(cbind(data, weight)) 
+  data <- data[End >= start.date & Start <= end.date]
+  data[, `:=`(duration, End - Start)] 
+  data[, `:=`(weight.per.unit, weight/duration)]
+  breaks <<- seq(start.date, end.date, bin.width)
+  labels <- numeric(0) 
+  for (i in 1:(length(breaks) - 1)) {
+    labels[i] <- paste(breaks[i], breaks[i + 1], sep = "-")
+  }
+  aorist <- data.table(bin = labels, bin.no = 1:length(labels), 
+                       aorist = 0)
+  for (i in 1:length(labels)) {
+    bin.1 <- breaks[i] 
+    bin.2 <- breaks[i + 1] 
+    data[, `:=`(assign("a", labels[i]), 0)] 
+    data[Start >= bin.1 & Start < bin.2, `:=`(assign("a", 
+        labels[i]), (bin.2 - Start) * weight.per.unit)]
+    data[End > bin.1 & End <= bin.2, `:=`(assign("a", labels[i]), 
+        (End - bin.1) * weight.per.unit)]
+    data[Start < bin.1 & End > bin.2, `:=`(assign("a", labels[i]), 
+        bin.width * weight.per.unit)]
+    data[Start >= bin.1 & End <= bin.2, `:=`(assign("a", 
+        labels[i]), as.double(weight))]
+    aorist$aorist[i] <- sum(data[, get(labels[i])], na.rm = TRUE)
+  }
+  aorist
+}
+```
+
+
+#### `my_aorist()` function
+
+Here is my implementation of the aorist function using `data.table::foverlaps()` and `dplyr`.
+
+```{r my_aoristic, comment=''}
+my_aorist <- function(data, weight = 1, start.date = 0, end.date = 2000, 
+                      bin.width = 100, round_int = 4) {
+  require(dplyr)
+  require(data.table)
+  time_steps <- data.frame(
+    step  = seq(1:(abs(end.date)/bin.width)), # end not start b/c pos dates
+    Start = seq(start.date,(end.date-bin.width), by = bin.width),
+    End   = seq((start.date+bin.width),end.date, by = bin.width))
+  setDT(time_steps)
+  setDT(data)
+  setkey(time_steps, Start, End)
+  overlap_names <- data.table::foverlaps(data, time_steps, 
+                                         type = "any", which = FALSE) %>%
+    filter(i.Start != End & i.End != Start)
+  aorist <- overlap_names %>%
+    data.frame() %>%
+    group_by(name) %>%
+    mutate(site_count = n(),
+           W = (bin.width / (i.End - i.Start)), # SWITCHED b/c of pos dates
+           W = round(W,round_int)) %>%
+    arrange(name, step) %>%
+    group_by(step) %>%
+    summarise(step_W = sum(W),
+              median_step_W = median(W),
+              site_count = n()) %>%
+    right_join(., time_steps, by = "step") %>%
+    replace_na(list(step_W = 0, site_count = 0, median_step_W = 0)) %>%
+    mutate(bin.no = step,
+           bin = paste0(Start, "-", End),
+           aorist = step_W) %>%
+    dplyr::select(bin, bin.no, aorist)
+  return(aorist)
+}
+```
+
+
+
+#### Loop over range of sites/events
+
+The `for` loop to execute both functions over a range of sites/events and record the execution time.  I commented out the progress bar code because I don't think `knitr` will appreciate it.
+
+```{r, echo=FALSE}
+time_step_size <- 100 # years
+seq_begin <- -5000
+seq_end   <- 0
+
+max_site_count <- 10000
+sim_site_count_seq <- c(10,seq(50,max_site_count,50))
+
+execute_time_results <- matrix(nrow = length(sim_site_count_seq), ncol = 3)
+colnames(execute_time_results) <- c("site_count", "aorist", "my_aorist")
+# pb <- txtProgressBar(min = 0, max = length(sim_site_count_seq), style = 3, char="*")
+for(i in seq_along(sim_site_count_seq)){
+  sim_site_count <- sim_site_count_seq[i]
+  sites2 <- data.frame(
+    name  = seq(1:sim_site_count),
+    begin = sample(seq(-5000,-1000, by = 100), sim_site_count, replace = TRUE)) %>%
+    mutate(end = begin + sample(seq(100, 3000, by = 100),
+                                length(begin), replace = TRUE),
+           end = ifelse(end > 0, 0, end)) %>%
+    dplyr::select(begin, end, name) %>%
+    mutate(begin = abs(begin), end = abs(end)) %>%
+    dplyr::rename(Start = end, End = begin)
+  
+  aor.start.time <- Sys.time()
+    aor <- archSeries_aorist(sites2, end.date = 5000, bin.width = 100)
+  aor.end.time <- Sys.time()
+  my.aor.start.time <- Sys.time()
+    my_aor <- my_aorist(sites2, end.date = 5000, bin.width = 100)
+  my.aor.end.time <- Sys.time()
+  
+  aor.execute.time <- aor.end.time - aor.start.time
+  my.aor.execute.time <- my.aor.end.time - my.aor.start.time
+  execute_time_results[i,1] <- sim_site_count
+  execute_time_results[i,2] <- aor.execute.time
+  execute_time_results[i,3] <- my.aor.execute.time
+  # setTxtProgressBar(pb, i)
+}
+# close(pb)
+
+```
+
+
+
+#### Format and Summarise results
+
+```{r }
+execute_time_results <- data.frame(execute_time_results) %>%
+  mutate(diff = my_aorist - aorist)
+
+execute_time_summary <- execute_time_results %>%
+  summarise(site_count_min = floor(min(site_count)),
+            site_count_max = floor(max(site_count)),
+            mean_aorist    = round(mean(aorist),3),
+            mean_my_aorist = round(mean(my_aorist),3),
+            max_diff       = round(min(diff),3), # reverse b/c negative time
+            min_diff       = round(max(diff),4), # reverse b/c negative time
+            mean_diff      = round(mean(diff),3)) %>%
+  t()
+print(execute_time_summary)
+```
+
+
+#### Rate of Increase
+
+quick check to see the rates of execution time increases over range of sites/events
+
+```{r}
+aor_lm <- lm(aorist ~ site_count, data = execute_time_results)
+aor_lm <- (as.numeric(coef(aor_lm))[2]) * 10000
+my_aor_lm <- lm(my_aorist ~ site_count, data = execute_time_results)
+my_aor_lm <- (as.numeric(coef(my_aor_lm))[2]) * 10000
+message(paste0("Initially, my_aoristic is ", round(execute_time_results[2,"diff"],3),
+  " seconds faster at ", execute_time_results[2,"site_count"], " sites, is equivalent at 5000 sites, and is ",
+  round(execute_time_results[201,"diff"],3), " seconds slower at 10,000 sites. For every 1000 sites added: aoristic = ", round(aor_lm,4), " seconds increase; my_aoristic = ",
+               round(my_aor_lm,4), " seconds increase in execution time."))
+```
+
+
+
+#### Plot results
+
+
+```{r}
+plot_dat <- execute_time_results %>%
+  dplyr::select(site_count, aorist, my_aorist) %>%
+  gather(model, time, -site_count)
+
+ggplot(plot_dat, aes(x = site_count, y = time, group = model, color = model)) +
+  geom_line(size = 1) +
+  theme_bw()
+```
+
+
+#### Function profiling
+
+These are best to use the `print()` function to open the profiles in your browser 
+
+```{r function_profiling, comment=''}
+profvis({
+  aor_profile <- aorist(sites2, end.date = 5000, bin.width = 100)
+  # print(aor_profile)
+})
+
+profvis({
+  my_aor_profile <- my_aorist(sites2, end.date = 5000, bin.width = 100)
+  # print(aor_profile)
+})
+
+```
+
+
+
+### Repeat with no `dplyr`
+
+
+The same code chunks as above mashed into one chunk with a the only change being the commenting out of `dplyr` code from `my_aorist2()` function.  While this shows the speed increase that is achieved by `foverlaps()`, it is not a fair comparison as the removal of `mutate()` will still need to be replaced by some data munging.  Or, just deal with the half-second of execution time and move along :)
+
+```{r}
+my_aorist2 <- function(data, weight = 1, start.date = 0, end.date = 2000, 
+                      bin.width = 100, round_int = 4) {
+  require(dplyr)
+  require(data.table)
+  time_steps <- data.frame(
+    step  = seq(1:(abs(end.date)/bin.width)), # end not start b/c pos dates
+    Start = seq(start.date,(end.date-bin.width), by = bin.width),
+    End   = seq((start.date+bin.width),end.date, by = bin.width))
+  setDT(time_steps)
+  setDT(data)
+  setkey(time_steps, Start, End)
+  overlap_names <- data.table::foverlaps(data, time_steps, 
+                                         type = "any", which = FALSE) %>%
+    filter(i.Start != End & i.End != Start)
+  aorist <- overlap_names # %>%
+#     data.frame() %>%
+#     group_by(name) %>%
+#     mutate(site_count = n(),
+#            W = (bin.width / (i.End - i.Start)), # SWITCHED b/c of pos dates
+#            W = round(W,round_int)) %>%
+#     arrange(name, step) %>%
+#     group_by(step) %>%
+#     summarise(step_W = sum(W),
+#               median_step_W = median(W),
+#               site_count = n()) %>%
+#     right_join(., time_steps, by = "step") %>%
+#     replace_na(list(step_W = 0, site_count = 0, median_step_W = 0)) %>%
+#     mutate(bin.no = step,
+#            bin = paste0(Start, "-", End),
+#            aorist = step_W) %>%
+#     dplyr::select(bin, bin.no, aorist)
+  return(aorist)
+}
+
+execute_time_results <- matrix(nrow = length(sim_site_count_seq), ncol = 3)
+colnames(execute_time_results) <- c("site_count", "aorist", "my_aorist")
+# pb <- txtProgressBar(min = 0, max = length(sim_site_count_seq), style = 3, char="*")
+for(i in seq_along(sim_site_count_seq)){
+  sim_site_count <- sim_site_count_seq[i]
+  sites2 <- data.frame(
+    name  = seq(1:sim_site_count),
+    begin = sample(seq(-5000,-1000, by = 100), sim_site_count, replace = TRUE)) %>%
+    mutate(end = begin + sample(seq(100, 3000, by = 100),
+                                length(begin), replace = TRUE),
+           end = ifelse(end > 0, 0, end)) %>%
+    dplyr::select(begin, end, name) %>%
+    mutate(begin = abs(begin), end = abs(end)) %>%
+    dplyr::rename(Start = end, End = begin)
+  
+  aor.start.time <- Sys.time()
+    aor <- archSeries_aorist(sites2, end.date = 5000, bin.width = 100)
+  aor.end.time <- Sys.time()
+  my.aor.start.time <- Sys.time()
+    my_aor <- my_aorist2(sites2, end.date = 5000, bin.width = 100) # my_aorist2()
+  my.aor.end.time <- Sys.time()
+  
+  aor.execute.time <- aor.end.time - aor.start.time
+  my.aor.execute.time <- my.aor.end.time - my.aor.start.time
+  execute_time_results[i,1] <- sim_site_count
+  execute_time_results[i,2] <- aor.execute.time
+  execute_time_results[i,3] <- my.aor.execute.time
+  # setTxtProgressBar(pb, i)
+}
+# close(pb)
+
+execute_time_results <- data.frame(execute_time_results) %>%
+  mutate(diff = my_aorist - aorist)
+
+execute_time_summary <- execute_time_results %>%
+  summarise(site_count_min = floor(min(site_count)),
+            site_count_max = floor(max(site_count)),
+            mean_aorist    = round(mean(aorist),3),
+            mean_my_aorist = round(mean(my_aorist),3),
+            max_diff       = round(min(diff),3), # reverse b/c negative time
+            min_diff       = round(max(diff),4), # reverse b/c negative time
+            mean_diff      = round(mean(diff),3)) %>%
+  t()
+print(execute_time_summary)
+
+aor_lm <- lm(aorist ~ site_count, data = execute_time_results)
+aor_lm <- (as.numeric(coef(aor_lm))[2]) * 10000
+my_aor_lm <- lm(my_aorist ~ site_count, data = execute_time_results)
+my_aor_lm <- (as.numeric(coef(my_aor_lm))[2]) * 10000
+message(paste0("Initially, my_aoristic is ", round(execute_time_results[2,"diff"],3),
+  " seconds faster at ", execute_time_results[2,"site_count"], " sites, is equivalent at 5000 sites, and is ",
+  round(execute_time_results[201,"diff"],3), " seconds slower at 10,000 sites. For every 1000 sites added: aoristic = ", round(aor_lm,4), " seconds increase; my_aoristic = ",
+               round(my_aor_lm,4), " seconds increase in execution time."))
+
+plot_dat <- execute_time_results %>%
+  dplyr::select(site_count, aorist, my_aorist) %>%
+  gather(model, time, -site_count)
+
+ggplot(plot_dat, aes(x = site_count, y = time, group = model, color = model)) +
+  geom_line(size = 1) +
+  theme_bw()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
