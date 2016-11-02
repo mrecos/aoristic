@@ -20,7 +20,7 @@ library("scales")
 time_step_size <- 100 # years
 seq_begin <- -5000
 seq_end   <- 0
-sim_site_count <- 250
+sim_site_count <- 20
 
 periods <- data.frame(
   period = c("a","b","c","d"),
@@ -71,7 +71,6 @@ weights <- overlap_names %>%
   data.frame() %>%
   group_by(name) %>%
   mutate(site_count = n(),
-         # W = (1/site_count),
          W = (time_step_size / abs(i.end - i.begin)),
          W = round(W,3)) %>%
   arrange(name, step)
